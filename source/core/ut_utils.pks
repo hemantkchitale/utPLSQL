@@ -1,7 +1,7 @@
 create or replace package ut_utils authid definer is
   /*
   utPLSQL - Version 3
-  Copyright 2016 - 2017 utPLSQL Project
+  Copyright 2016 - 2019 utPLSQL Project
 
   Licensed under the Apache License, Version 2.0 (the "License"):
   you may not use this file except in compliance with the License.
@@ -21,38 +21,41 @@ create or replace package ut_utils authid definer is
    *
    */
 
-  gc_version                 constant varchar2(50) := 'v3.1.0.1688-develop';
-
-  /* Constants: Event names */
-  gc_run                     constant varchar2(12) := 'run';
-  gc_suite                   constant varchar2(12) := 'suite';
-  gc_before_all              constant varchar2(12) := 'before_all';
-  gc_before_each             constant varchar2(12) := 'before_each';
-  gc_before_test             constant varchar2(12) := 'before_test';
-  gc_test                    constant varchar2(12) := 'test';
-  gc_test_execute            constant varchar2(12) := 'test_execute';
-  gc_after_test              constant varchar2(10) := 'after_test';
-  gc_after_each              constant varchar2(12) := 'after_each';
-  gc_after_all               constant varchar2(12) := 'after_all';
-  gc_finalize                constant varchar2(12) := 'finalize';
+  gc_version                 constant varchar2(50) := 'v3.1.9.3198-develop';
+    
+  subtype t_executable_type      is varchar2(30);
+  gc_before_all                  constant t_executable_type := 'beforeall';
+  gc_before_each                 constant t_executable_type := 'beforeeach';
+  gc_before_test                 constant t_executable_type := 'beforetest';
+  gc_test_execute                constant t_executable_type := 'test';
+  gc_after_test                  constant t_executable_type := 'aftertest';
+  gc_after_each                  constant t_executable_type := 'aftereach';
+  gc_after_all                   constant t_executable_type := 'afterall';
 
   /* Constants: Test Results */
-  tr_disabled                constant number(1) := 0; -- test/suite was disabled
-  tr_success                 constant number(1) := 1; -- test passed
-  tr_failure                 constant number(1) := 2; -- one or more expectations failed
-  tr_error                   constant number(1) := 3; -- exception was raised
+  subtype t_test_result   is binary_integer range 0 .. 3;
+  gc_disabled                constant t_test_result := 0; -- test/suite was disabled
+  gc_success                 constant t_test_result := 1; -- test passed
+  gc_failure                 constant t_test_result := 2; -- one or more expectations failed
+  gc_error                   constant t_test_result := 3; -- exception was raised
 
-  tr_disabled_char           constant varchar2(8) := 'Disabled'; -- test/suite was disabled
-  tr_success_char            constant varchar2(7) := 'Success'; -- test passed
-  tr_failure_char            constant varchar2(7) := 'Failure'; -- one or more expectations failed
-  tr_error_char              constant varchar2(5) := 'Error'; -- exception was raised
+  gc_disabled_char           constant varchar2(8) := 'Disabled'; -- test/suite was disabled
+  gc_success_char            constant varchar2(7) := 'Success'; -- test passed
+  gc_failure_char            constant varchar2(7) := 'Failure'; -- one or more expectations failed
+  gc_error_char              constant varchar2(5) := 'Error'; -- exception was raised
+
+  gc_cdata_start_tag         constant varchar2(10) := '<![CDATA[';
+  gc_cdata_end_tag           constant varchar2(10) := ']]>';
+  gc_cdata_end_tag_wrap      constant varchar2(30) := ']]'||gc_cdata_end_tag||gc_cdata_start_tag||'>';
+
 
   /*
     Constants: Rollback type for ut_test_object
   */
-  gc_rollback_auto           constant number(1) := 0; -- rollback after each test and suite
-  gc_rollback_manual         constant number(1) := 1; -- leave transaction control manual
-  --gc_rollback_on_error       constant number(1) := 2; -- rollback tests only on error
+  subtype t_rollback_type is binary_integer range 0 .. 1;
+  gc_rollback_auto           constant t_rollback_type := 0; -- rollback after each test and suite
+  gc_rollback_manual         constant t_rollback_type := 1; -- leave transaction control manual
+  gc_rollback_default        constant t_rollback_type := gc_rollback_auto;
 
   ex_unsupported_rollback_type exception;
   gc_unsupported_rollback_type constant pls_integer := -20200;
@@ -85,21 +88,60 @@ create or replace package ut_utils authid definer is
   gc_some_tests_failed constant pls_integer := -20213;
   pragma exception_init(ex_some_tests_failed, -20213);
 
-  -- Any of tests failed
+  -- Version number provided is not in valid format
   ex_invalid_version_no exception;
   gc_invalid_version_no constant pls_integer := -20214;
   pragma exception_init(ex_invalid_version_no, -20214);
 
+  -- Version number provided is not in valid format
+  ex_out_buffer_timeout exception;
+  gc_out_buffer_timeout constant pls_integer := -20215;
+  pragma exception_init(ex_out_buffer_timeout, -20215);
+
+  ex_invalid_package exception;
+  gc_invalid_package constant pls_integer := -6550;
+  pragma exception_init(ex_invalid_package, -6550);
+
+  ex_failure_for_all exception;
+  gc_failure_for_all constant pls_integer := -24381;
+  pragma exception_init (ex_failure_for_all, -24381);
+
+  ex_dml_for_all exception;
+  gc_dml_for_all constant pls_integer := -20216;
+  pragma exception_init (ex_dml_for_all, -20216);
+
+  ex_value_too_large exception;
+  gc_value_too_large constant pls_integer := -20217;
+  pragma exception_init (ex_value_too_large, -20217);
+
+  ex_xml_processing exception;
+  gc_xml_processing constant pls_integer := -19202;
+  pragma exception_init (ex_xml_processing, -19202);
+  
+  ex_failed_open_cur exception;
+  gc_failed_open_cur constant pls_integer := -20218;
+  pragma exception_init (ex_failed_open_cur, -20218);  
+  
   gc_max_storage_varchar2_len constant integer := 4000;
   gc_max_output_string_length constant integer := 4000;
-  gc_max_input_string_length  constant integer := gc_max_output_string_length - 2; --we need to remove 2 chars for quotes around string
   gc_more_data_string         constant varchar2(5) := '[...]';
-  gc_overflow_substr_len      constant integer := gc_max_input_string_length - length(gc_more_data_string);
+  gc_more_data_string_len     constant integer := length( gc_more_data_string );
   gc_number_format            constant varchar2(100) := 'TM9';
   gc_date_format              constant varchar2(100) := 'yyyy-mm-dd"T"hh24:mi:ss';
   gc_timestamp_format         constant varchar2(100) := 'yyyy-mm-dd"T"hh24:mi:ssxff';
   gc_timestamp_tz_format      constant varchar2(100) := 'yyyy-mm-dd"T"hh24:mi:ssxff tzh:tzm';
   gc_null_string              constant varchar2(4) := 'NULL';
+  gc_empty_string             constant varchar2(5) := 'EMPTY';
+
+  gc_bc_fetch_limit           constant integer := 1000;
+  gc_diff_max_rows            constant integer := 20;
+
+  gc_max_objects_fetch_limit  constant integer := 1000000;
+
+  /** 
+  * Regexp to validate tag
+  */
+  gc_word_no_space              constant varchar2(50) := '^(\w|\S)+$';
 
   type t_version is record(
     major  natural,
@@ -132,11 +174,23 @@ create or replace package ut_utils authid definer is
 
   procedure debug_log(a_message clob);
 
-  function to_string(a_value varchar2, a_qoute_char varchar2 := '''') return varchar2;
+  function to_string(
+    a_value varchar2,
+    a_quote_char varchar2 := '''',
+    a_max_output_len in number := gc_max_output_string_length
+  ) return varchar2;
 
-  function to_string(a_value clob, a_qoute_char varchar2 := '''') return varchar2;
+  function to_string(
+    a_value clob,
+    a_quote_char varchar2 := '''',
+    a_max_output_len in number := gc_max_output_string_length
+  ) return varchar2;
 
-  function to_string(a_value blob, a_qoute_char varchar2 := '''') return varchar2;
+  function to_string(
+    a_value blob,
+    a_quote_char varchar2 := '''',
+    a_max_output_len in number := gc_max_output_string_length
+  ) return varchar2;
 
   function to_string(a_value boolean) return varchar2;
 
@@ -157,12 +211,6 @@ create or replace package ut_utils authid definer is
   function boolean_to_int(a_value boolean) return integer;
 
   function int_to_boolean(a_value integer) return boolean;
-
-  /**
-   * Validates passed value against supported rollback types
-   */
-  procedure validate_rollback_type(a_rollback_type number);
-
 
   /**
    *
@@ -198,7 +246,9 @@ create or replace package ut_utils authid definer is
   function clob_to_table(a_clob clob, a_max_amount integer := 8191, a_delimiter varchar2:= chr(10)) return ut_varchar2_list;
 
   function table_to_clob(a_text_table ut_varchar2_list, a_delimiter varchar2:= chr(10)) return clob;
-
+  
+  function table_to_clob(a_text_table ut_varchar2_rows, a_delimiter varchar2:= chr(10)) return clob;
+  
   function table_to_clob(a_integer_table ut_integer_list, a_delimiter varchar2:= chr(10)) return clob;
 
   /**
@@ -222,6 +272,21 @@ create or replace package ut_utils authid definer is
    */
   procedure append_to_list(a_list in out nocopy ut_varchar2_list, a_item varchar2);
 
+  /**
+   * Append a item to the end of ut_varchar2_rows
+   */
+  procedure append_to_list(a_list in out nocopy ut_varchar2_rows, a_item varchar2);
+
+  /**
+   * Append a item to the end of ut_varchar2_rows
+   */
+  procedure append_to_list(a_list in out nocopy ut_varchar2_rows, a_item clob);
+
+  /**
+   * Append a list of items to the end of ut_varchar2_rows
+   */
+  procedure append_to_list(a_list in out nocopy ut_varchar2_rows, a_items ut_varchar2_rows);
+
   procedure append_to_clob(a_src_clob in out nocopy clob, a_clob_table t_clob_tab, a_delimiter varchar2 := chr(10));
 
   procedure append_to_clob(a_src_clob in out nocopy clob, a_new_data clob);
@@ -230,21 +295,15 @@ create or replace package ut_utils authid definer is
 
   function convert_collection(a_collection ut_varchar2_list) return ut_varchar2_rows;
 
-  /**
-   * Set session's action and module using dbms_application_info
-   */
-  procedure set_action(a_text in varchar2);
-
-  /**
-   * Set session's client info using dbms_application_info
-   */
-  procedure set_client_info(a_text in varchar2);
-
   function to_xpath(a_list varchar2, a_ancestors varchar2 := '/*/') return varchar2;
 
   function to_xpath(a_list ut_varchar2_list, a_ancestors varchar2 := '/*/') return varchar2;
 
-  procedure cleanup_temp_tables;
+  /*
+  * Truncates session-level GTT's (on commit preserve rows)
+  * IMPORTANT: Procedure will do an implicit commit when called
+  */
+  procedure cleanup_session_temp_tables;
 
   /**
    * Converts version string into version record
@@ -296,11 +355,85 @@ create or replace package ut_utils authid definer is
   */
   function to_xml_number_format(a_value number) return varchar2;
 
-  /*It takes a collection of type ut_varchar2_list and it trims the characters passed as arguments for every element*/
+
+  /**
+  * Returns xml header. If a_encoding is not null, header will include encoding attribute with provided value
+  */
+  function get_xml_header(a_encoding varchar2) return varchar2;
+
+
+  /**
+  * Takes a collection of type ut_varchar2_list and it trims the characters passed as arguments for every element
+  */
   function trim_list_elements(a_list IN ut_varchar2_list, a_regexp_to_trim in varchar2 default '[:space:]') return ut_varchar2_list;
 
-  /*It takes a collection of type ut_varchar2_list and it only returns the elements which meets the regular expression*/
+  /**
+  * Takes a collection of type ut_varchar2_list and it only returns the elements which meets the regular expression
+  */
   function filter_list(a_list IN ut_varchar2_list, a_regexp_filter in varchar2) return ut_varchar2_list;
+
+  -- Generates XMLGEN escaped string
+  function xmlgen_escaped_string(a_string in varchar2) return varchar2;
+
+  /**
+  * Replaces multi-line comments in given source-code with empty lines
+  */
+  function replace_multiline_comments(a_source clob) return clob;
+
+   /**
+   * Returns list of sub-type reporters for given list of super-type reporters
+   */
+  function get_child_reporters(a_for_reporters ut_reporters_info := null) return ut_reporters_info;
+  
+  /**
+  * Remove given ORA error from stack
+  */
+  function remove_error_from_stack(a_error_stack varchar2, a_ora_code number) return varchar2;
+  
+  /**
+  * Check if xml name is valid if not build a valid name
+  */
+  function get_valid_xml_name(a_name varchar2) return varchar2;
+
+  /**
+  * Converts input list into a list surrounded by CDATA tags
+  * All CDATA end tags get escaped using recommended method from https://en.wikipedia.org/wiki/CDATA#Nesting
+  */
+  function to_cdata(a_lines ut_varchar2_rows) return ut_varchar2_rows;
+
+  /**
+  * Converts input CLOB into a CLOB surrounded by CDATA tags
+  * All CDATA end tags get escaped using recommended method from https://en.wikipedia.org/wiki/CDATA#Nesting
+  */
+  function to_cdata(a_clob clob) return clob;
+
+  /**
+  * Add prefix word to elements of list
+  */
+  function add_prefix(a_list ut_varchar2_list, a_prefix varchar2, a_connector varchar2 := '/') return ut_varchar2_list;
+
+  function add_prefix(a_item varchar2, a_prefix varchar2, a_connector varchar2 := '/') return varchar2;
+
+  function strip_prefix(a_item varchar2, a_prefix varchar2, a_connector varchar2 := '/') return varchar2;
+
+
+  subtype t_hash  is raw(128);
+
+  /*
+  * Wrapper function for calling dbms_crypto.hash
+  */
+  function get_hash(a_data raw, a_hash_type binary_integer := dbms_crypto.hash_sh1)  return t_hash;
+
+  /*
+  * Wrapper function for calling dbms_crypto.hash
+  */
+  function get_hash(a_data clob, a_hash_type binary_integer := dbms_crypto.hash_sh1) return t_hash;
+
+  /*
+  * Verifies that the input string is a qualified SQL name using sys.dbms_assert.qualified_sql_name
+  * If null value passed returns null
+  */
+  function qualified_sql_name(a_name varchar2) return varchar2;
 
 end ut_utils;
 /

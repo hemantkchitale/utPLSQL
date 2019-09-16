@@ -1,7 +1,7 @@
 create or replace type body ut_object_name as
   /*
   utPLSQL - Version 3
-  Copyright 2016 - 2017 utPLSQL Project
+  Copyright 2016 - 2019 utPLSQL Project
 
   Licensed under the Apache License, Version 2.0 (the "License"):
   you may not use this file except in compliance with the License.
@@ -24,8 +24,12 @@ create or replace type body ut_object_name as
 
   constructor function ut_object_name(self in out nocopy ut_object_name, a_unit_name varchar2) return self as result is
   begin
-    self.owner := upper(regexp_substr(a_unit_name,'[^\.]+', 1, 1));
-    self.name  := upper(regexp_substr(a_unit_name,'[^\.]+', 1, 2));
+    if instr(a_unit_name,'.') > 0 then
+      self.owner := upper(regexp_substr(a_unit_name,'[^\.]+', 1, 1));
+      self.name  := upper(regexp_substr(a_unit_name,'[^\.]+', 1, 2));
+    else
+      self.name  := upper(a_unit_name);
+    end if;
     return;
   end;
 

@@ -1,7 +1,7 @@
 create or replace package body ut_coverage is
   /*
   utPLSQL - Version 3
-  Copyright 2016 - 2017 utPLSQL Project
+  Copyright 2016 - 2019 utPLSQL Project
 
   Licensed under the Apache License, Version 2.0 (the "License"):
   you may not use this file except in compliance with the License.
@@ -16,103 +16,136 @@ create or replace package body ut_coverage is
   limitations under the License.
   */
 
-  type t_source_lines is table of binary_integer;
+  g_coverage_id   tt_coverage_id_arr;
+  g_develop_mode  boolean not null := false;
+  g_is_started    boolean not null := false;
 
-  -- The source query has two important transformations done in it.
-  -- the flag: to_be_skipped ='Y' is set for a line of code that is badly reported by DBMS_PROFILER as executed 0 times.
-  -- This includes lines that are:
-  --   - PACKAGE, PROCEDURE, FUNCTION definition line,
-  --   - BEGIN, END  of a block
-  -- Another transformation is adjustment of line number for TRIGGER body.
-  -- DBMS_PROFILER is reporting line numbers for triggers not as defined in DBA_SOURCE, its usign line numbers as defined in DBA_TRIGGERS
-  -- the DBA_TRIGGERS does not contain the trigger specification lines, only lines that define the trigger body.
-  -- the query adjusts the line numbers for triggers by finding first occurrence of begin|declare|compound in the trigger body line.
-  -- The subquery is optimized by:
-  -- - COALESCE function -> it will execute only for TRIGGERS
-  -- - scalar subquery cache -> it will only execute once for one trigger source code.
-  function get_cov_sources_sql(a_coverage_options ut_coverage_options) return varchar2 is
-    l_result varchar2(32767);
-    l_full_name varchar2(100);
-    l_view_name      varchar2(200) := ut_metadata.get_dba_view('dba_source');
+  procedure set_develop_mode(a_develop_mode in boolean) is
+    begin
+      g_develop_mode := a_develop_mode;
+    end;
+
+  function get_coverage_id(a_coverage_type in varchar2) return integer is
+    begin
+      return g_coverage_id(a_coverage_type);
+    end;
+
+  function is_develop_mode return boolean is
+    begin
+      return g_develop_mode;
+    end;
+
+  function get_cov_sources_sql(a_coverage_options ut_coverage_options, a_skip_objects  ut_object_names) return varchar2 is
+    l_result                varchar2(32767);
+    l_full_name             varchar2(32767);
+    l_join_mappings         varchar2(32767);
+    l_filters               varchar2(32767);
+    l_mappings_cardinality  integer := 0;
   begin
-    if a_coverage_options.file_mappings is not null and a_coverage_options.file_mappings.count > 0 then
-      l_full_name := 'f.file_name';
-    else
-      l_full_name := 'lower(s.owner||''.''||s.name)';
-    end if;
-    l_result := '
-      select full_name, owner, name, line, to_be_skipped, text
-        from (
-          select '||l_full_name||q'[ as full_name,
-                 s.owner,
-                 s.name,
-                 s.line -
-                 coalesce(
-                   case when type!='TRIGGER' then 0 end,
-                   (select min(t.line) - 1
-                      from ]'||l_view_name||q'[ t
-                     where t.owner = s.owner and t.type = s.type and t.name = s.name
-                       and regexp_like( t.text, '[A-Za-z0-9$#_]*(begin|declare|compound).*','i'))
-                 ) as line,
-                 s.text,
-                 case
-                   when
-                     -- to avoid execution of regexp_like on every line
-                     -- first do a rough check for existence of search pattern keyword
-                     (lower(s.text) like '%procedure%'
-                      or lower(s.text) like '%function%'
-                      or lower(s.text) like '%begin%'
-                      or lower(s.text) like '%end%'
-                      or lower(s.text) like '%package%'
-                     ) and
-                     regexp_like(
-                        s.text,
-                        '^([\t ]*(((not)?\s*(overriding|final|instantiable)[\t ]*)*(static|constructor|member)?[\t ]*(procedure|function)|package([\t ]+body)|begin|end([\t ]+\S+)*[ \t]*;))', 'i'
-                     )
-                    then 'Y'
-                 end as to_be_skipped
-            from ]'||l_view_name||q'[ s]';
+    l_result := q'[
+    with
+      trigger_source_offsets as (
+        select min(s.line) - 1 offset, s.owner, s.name, s.type
+          from {sources_view} s
+         where s.type = 'TRIGGER'
+           {filters}
+           and (lower(s.text) like '%begin%' or lower(s.text) like '%declare%' or lower(s.text) like '%compound%')
+         group by s.owner, s.name, s.type
+      ),
+      sources as (
+        select /*+ cardinality(f {mappings_cardinality}) */
+               {l_full_name} as full_name, s.owner, s.name,
+               s.line - case when s.type = 'TRIGGER' then o.offset else 0 end as line,
+               s.text
+          from {sources_view} s {join_file_mappings}
+          left join trigger_source_offsets o
+            on (s.owner = o.owner and s.name = o.name and s.type = o.type)
+         where s.type in ('PACKAGE BODY', 'TYPE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER')
+           {filters}
+      ),
+      coverage_sources as (
+        select full_name, owner, name, line, text,
+               case
+                 when
+                   -- to avoid execution of regexp_like on every line
+                   -- first do a rough check for existence of search pattern keyword
+                   (lower(s.text) like '%procedure%'
+                    or lower(s.text) like '%function%'
+                    or lower(s.text) like '%begin%'
+                    or lower(s.text) like '%end%'
+                    or lower(s.text) like '%package%'
+                   ) and
+                   regexp_like(
+                      s.text,
+                      '^([\t ]*(((not)?\s*(overriding|final|instantiable)[\t ]*)*(static|constructor|member)?[\t ]*(procedure|function)|package([\t ]+body)|begin|end([\t ]+\S+)*[ \t]*;))', 'i'
+                   )
+                  then 'Y'
+               end as to_be_skipped
+          from sources s
+      )
+    select full_name, owner, name, line, to_be_skipped, text
+      from coverage_sources s
+           -- Exclude calls to utPLSQL framework, Unit Test packages and objects from a_exclude_list parameter of coverage reporter
+     where (s.owner, s.name) not in ( select /*+ cardinality(el {skipped_objects_cardinality})*/el.owner, el.name from table(:l_skipped_objects) el )
+       and line > 0
+    ]';
+
     if a_coverage_options.file_mappings is not empty then
-      l_result := l_result || '
+      l_mappings_cardinality := ut_utils.scale_cardinality(cardinality(a_coverage_options.file_mappings));
+      l_full_name := 'f.file_name';
+      l_join_mappings := '
             join table(:file_mappings) f
               on s.name  = f.object_name
              and s.type  = f.object_type
-             and s.owner = f.object_owner
-           where 1 = 1';
-    elsif a_coverage_options.include_objects is not empty then
-      l_result := l_result || '
-           where (s.owner, s.name) in (select il.owner, il.name from table(:include_objects) il)';
+             and s.owner = f.object_owner';
     else
-      l_result := l_result || '
-           where s.owner in (select upper(t.column_value) from table(:l_schema_names) t)';
+      l_full_name := q'[lower(s.owner||'.'||s.name)]';
+      l_filters := case
+        when a_coverage_options.include_objects is not empty then '
+           and (s.owner, s.name) in (
+                 select /*+ cardinality(il '||ut_utils.scale_cardinality(cardinality(a_coverage_options.include_objects))||') */
+                        il.owner, il.name
+                   from table(:include_objects) il
+               )'
+        else '
+           and s.owner in (
+                 select /*+ cardinality(t '||ut_utils.scale_cardinality(cardinality(a_coverage_options.schema_names))||') */
+                        upper(t.column_value)
+                   from table(:l_schema_names) t)'
+        end;
     end if;
-    l_result := l_result || q'[
-             and s.type not in ('PACKAGE', 'TYPE', 'JAVA SOURCE')
-             --Exclude calls to utPLSQL framework, Unit Test packages and objects from a_exclude_list parameter of coverage reporter
-             and (s.owner, s.name) not in (select el.owner, el.name from table(:l_skipped_objects) el)
-             )
-       where line > 0]';
+
+    l_result := replace(l_result, '{sources_view}',         ut_metadata.get_source_view_name());
+    l_result := replace(l_result, '{l_full_name}',          l_full_name);
+    l_result := replace(l_result, '{join_file_mappings}',   l_join_mappings);
+    l_result := replace(l_result, '{filters}',              l_filters);
+    l_result := replace(l_result, '{mappings_cardinality}', l_mappings_cardinality);
+    l_result := replace(l_result, '{skipped_objects_cardinality}', ut_utils.scale_cardinality(cardinality(a_skip_objects)));
+
     return l_result;
+
   end;
 
-  function get_cov_sources_cursor(a_coverage_options ut_coverage_options) return sys_refcursor is
+  function get_cov_sources_cursor(a_coverage_options in ut_coverage_options) return sys_refcursor is
     l_cursor        sys_refcursor;
     l_skip_objects  ut_object_names;
-    l_schema_names  ut_varchar2_rows;
     l_sql           varchar2(32767);
   begin
-    l_schema_names := coalesce(a_coverage_options.schema_names, ut_varchar2_rows(sys_context('USERENV','CURRENT_SCHEMA')));
-    if not ut_coverage_helper.is_develop_mode() then
+    if not is_develop_mode() then
       --skip all the utplsql framework objects and all the unit test packages that could potentially be reported by coverage.
       l_skip_objects := ut_utils.get_utplsql_objects_list() multiset union all coalesce(a_coverage_options.exclude_objects, ut_object_names());
     end if;
-    l_sql := get_cov_sources_sql(a_coverage_options);
+
+    l_sql := get_cov_sources_sql(a_coverage_options, l_skip_objects);
+
+    ut_event_manager.trigger_event(ut_event_manager.gc_debug, ut_key_anyvalues().put('l_sql',l_sql) );
+
     if a_coverage_options.file_mappings is not empty then
       open l_cursor for l_sql using a_coverage_options.file_mappings, l_skip_objects;
     elsif a_coverage_options.include_objects is not empty then
-      open l_cursor for l_sql using a_coverage_options.include_objects, l_skip_objects;
+      open l_cursor for l_sql using a_coverage_options.include_objects, a_coverage_options.include_objects, l_skip_objects;
     else
-      open l_cursor for l_sql using l_schema_names, l_skip_objects;
+      open l_cursor for l_sql using a_coverage_options.schema_names, a_coverage_options.schema_names, l_skip_objects;
     end if;
     return l_cursor;
   end;
@@ -123,13 +156,12 @@ create or replace package body ut_coverage is
     l_cov_sources_data ut_coverage_helper.t_coverage_sources_tmp_rows;
   begin
 
-    if not ut_coverage_helper.is_tmp_table_populated() or ut_coverage_helper.is_develop_mode() then
+    if not ut_coverage_helper.is_tmp_table_populated() or is_develop_mode() then
       ut_coverage_helper.cleanup_tmp_table();
-
       l_cov_sources_crsr := get_cov_sources_cursor(a_coverage_options);
 
       loop
-        fetch l_cov_sources_crsr bulk collect into l_cov_sources_data limit 1000;
+        fetch l_cov_sources_crsr bulk collect into l_cov_sources_data limit 10000;
 
         ut_coverage_helper.insert_into_tmp_table(l_cov_sources_data);
 
@@ -145,112 +177,107 @@ create or replace package body ut_coverage is
   /**
   * Public functions
   */
-  procedure coverage_start is
+  procedure coverage_start(a_coverage_options ut_coverage_options default null) is
+    l_run_comment varchar2(200) := 'utPLSQL Code coverage run '||ut_utils.to_string(systimestamp);
   begin
-    ut_coverage_helper.coverage_start('utPLSQL Code coverage run '||ut_utils.to_string(systimestamp));
-  end;
-
-  procedure coverage_start_develop is
-  begin
-    ut_coverage_helper.coverage_start_develop();
+    if not is_develop_mode() and not g_is_started then
+      ut_coverage_helper_block.coverage_start( l_run_comment, g_coverage_id(gc_block_coverage) );
+      ut_coverage_helper_profiler.coverage_start( l_run_comment, g_coverage_id(gc_proftab_coverage) );
+      coverage_pause();
+      g_is_started := true;
+    end if;
   end;
 
   procedure coverage_pause is
   begin
-    ut_coverage_helper.coverage_pause();
+    if not is_develop_mode() then
+      ut_coverage_helper_profiler.coverage_pause();
+    end if;
   end;
 
   procedure coverage_resume is
   begin
-    ut_coverage_helper.coverage_resume();
+    ut_coverage_helper_profiler.coverage_resume();
+  end;
+
+  procedure mock_coverage_id(a_coverage_id integer,a_coverage_type in varchar2) is
+  begin
+    g_develop_mode := true;
+    g_is_started := true;
+    g_coverage_id(a_coverage_type) := a_coverage_id;
+  end;
+
+  procedure mock_coverage_id(a_coverage_id tt_coverage_id_arr) is
+  begin
+    g_develop_mode := true;
+    g_is_started := true;
+    g_coverage_id := a_coverage_id;
   end;
 
   procedure coverage_stop is
   begin
-    ut_coverage_helper.coverage_stop();
-  end;
-
-  procedure coverage_stop_develop is
-  begin
-    ut_coverage_helper.coverage_stop_develop();
+    if not is_develop_mode() then
+      g_is_started := false;
+      ut_coverage_helper_block.coverage_stop();
+      ut_coverage_helper_profiler.coverage_stop();
+      g_is_started := false;
+    end if;
   end;
 
   function get_coverage_data(a_coverage_options ut_coverage_options) return t_coverage is
-    l_line_calls          ut_coverage_helper.t_unit_line_calls;
-    l_result              t_coverage;
-    l_new_unit            t_unit_coverage;
-    line_no               binary_integer;
-    l_source_objects_crsr ut_coverage_helper.t_tmp_table_objects_crsr;
-    l_source_object       ut_coverage_helper.t_tmp_table_object;
+    l_result_block           ut_coverage.t_coverage;
+    l_result_profiler_enrich ut_coverage.t_coverage;
+    l_object                 ut_coverage.t_full_name;
+    l_line_no                binary_integer;
   begin
-
     --prepare global temp table with sources
+    ut_event_manager.trigger_event('about to populate coverage temp table');
     populate_tmp_table(a_coverage_options);
+    ut_event_manager.trigger_event('coverage temp table populated');
 
-    l_source_objects_crsr := ut_coverage_helper.get_tmp_table_objects_cursor();
-    loop
-      fetch l_source_objects_crsr into l_source_object;
-      exit when l_source_objects_crsr%notfound;
+    -- Get raw data for both reporters, order is important as tmp table will skip headers and dont populate
+    -- tmp table for block again.
+    l_result_profiler_enrich:= ut_coverage_profiler.get_coverage_data( a_coverage_options, get_coverage_id(gc_proftab_coverage) );
+    ut_event_manager.trigger_event('profiler coverage data retrieved');
 
-      --get coverage data
-      l_line_calls := ut_coverage_helper.get_raw_coverage_data( l_source_object.owner, l_source_object.name );
+    -- If block coverage available we will use it.
+    $if dbms_db_version.version = 12 and dbms_db_version.release >= 2 or dbms_db_version.version > 12 $then
+      l_result_block := ut_coverage_block.get_coverage_data( a_coverage_options, get_coverage_id(gc_block_coverage) );
+      ut_event_manager.trigger_event('block coverage data retrieved');
 
-      --if there is coverage, we need to filter out the garbage (badly indicated data from dbms_profiler)
-      if l_line_calls.count > 0 then
-        --remove lines that should not be indicted as meaningful
-        for i in 1 .. l_source_object.to_be_skipped_list.count loop
-          if l_source_object.to_be_skipped_list(i) is not null then
-            l_line_calls.delete(l_source_object.to_be_skipped_list(i));
-          end if;
-        end loop;
-      end if;
+      -- Enrich profiler results with some of the block results
+      l_object := l_result_profiler_enrich.objects.first;
+      while (l_object is not null) loop
 
-      --if there are no file mappings or object was actually captured by profiler
-      if a_coverage_options.file_mappings is null or l_line_calls.count > 0 then
+        l_line_no := l_result_profiler_enrich.objects(l_object).lines.first;
 
-        --populate total stats
-        l_result.total_lines := l_result.total_lines + l_source_object.lines_count;
-
-        --populate object level coverage stats
-        if not l_result.objects.exists(l_source_object.full_name) then
-          l_result.objects(l_source_object.full_name) := l_new_unit;
-          l_result.objects(l_source_object.full_name).owner := l_source_object.owner;
-          l_result.objects(l_source_object.full_name).name  := l_source_object.name;
-          l_result.objects(l_source_object.full_name).total_lines := l_source_object.lines_count;
-        end if;
-        --map to results
-        line_no := l_line_calls.first;
-        if line_no is null then
-          l_result.uncovered_lines := l_result.uncovered_lines + l_source_object.lines_count;
-          l_result.objects(l_source_object.full_name).uncovered_lines := l_source_object.lines_count;
-        else
-          loop
-            exit when line_no is null;
-
-            if l_line_calls(line_no) > 0 then
-              --total stats
-              l_result.covered_lines := l_result.covered_lines + 1;
-              l_result.executions := l_result.executions + l_line_calls(line_no);
-              --object level stats
-              l_result.objects(l_source_object.full_name).covered_lines := l_result.objects(l_source_object.full_name).covered_lines + 1;
-              l_result.objects(l_source_object.full_name).executions := l_result.objects(l_source_object.full_name).executions + l_line_calls(line_no);
-            elsif l_line_calls(line_no) = 0 then
-              l_result.uncovered_lines := l_result.uncovered_lines + 1;
-              l_result.objects(l_source_object.full_name).uncovered_lines := l_result.objects(l_source_object.full_name).uncovered_lines + 1;
+        -- to avoid no data found check if we got object in profiler
+        if l_result_block.objects.exists(l_object) then
+          while (l_line_no is not null) loop
+            -- To avoid no data check for object line
+            if l_result_block.objects(l_object).lines.exists(l_line_no) then
+             -- enrich line level stats
+             l_result_profiler_enrich.objects(l_object).lines(l_line_no).partcove := l_result_block.objects(l_object).lines(l_line_no).partcove;
+             l_result_profiler_enrich.objects(l_object).lines(l_line_no).covered_blocks := l_result_block.objects(l_object).lines(l_line_no).covered_blocks;
+             l_result_profiler_enrich.objects(l_object).lines(l_line_no).no_blocks := l_result_block.objects(l_object).lines(l_line_no).no_blocks;
+             -- enrich object level stats
+             l_result_profiler_enrich.objects(l_object).partcovered_lines :=  nvl(l_result_profiler_enrich.objects(l_object).partcovered_lines,0) + l_result_block.objects(l_object).lines(l_line_no).partcove;
             end if;
-            l_result.objects(l_source_object.full_name).lines(line_no) := l_line_calls(line_no);
-
-            line_no := l_line_calls.next(line_no);
+            --At the end go to next line
+            l_line_no := l_result_profiler_enrich.objects(l_object).lines.next(l_line_no);
           end loop;
+          --total level stats enrich
+          l_result_profiler_enrich.partcovered_lines := nvl(l_result_profiler_enrich.partcovered_lines,0) + l_result_profiler_enrich.objects(l_object).partcovered_lines;
+          -- At the end go to next object
         end if;
-      end if;
 
-    end loop;
-
-    close l_source_objects_crsr;
-
-    return l_result;
-  end get_coverage_data;
-
+        l_object := l_result_profiler_enrich.objects.next(l_object);
+      end loop;
+      ut_event_manager.trigger_event('coverage data combined');
+    $end
+        
+    return l_result_profiler_enrich;
+  end get_coverage_data;  
+  
 end;
 /

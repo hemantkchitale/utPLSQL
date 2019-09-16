@@ -1,7 +1,7 @@
 create or replace package ut_coverage_helper authid definer is
   /*
   utPLSQL - Version 3
-  Copyright 2016 - 2017 utPLSQL Project
+  Copyright 2016 - 2019 utPLSQL Project
 
   Licensed under the Apache License, Version 2.0 (the "License"):
   you may not use this file except in compliance with the License.
@@ -18,7 +18,15 @@ create or replace package ut_coverage_helper authid definer is
 
   --table of line calls indexed by line number
   --!!! this table is sparse!!!
-  type t_unit_line_calls is table of number(38,0) index by binary_integer;
+  --type t_unit_line_calls is table of number(38,0) index by binary_integer;
+
+  type t_unit_line_call is record(
+     blocks         binary_integer default 0
+    ,covered_blocks binary_integer default 0
+    ,partcovered    binary_integer default 0
+    ,calls          binary_integer default 0);
+
+  type t_unit_line_calls is table of t_unit_line_call index by binary_integer;
 
   type t_coverage_sources_tmp_row is record (
     full_name      ut_coverage_sources_tmp.full_name%type,
@@ -40,31 +48,6 @@ create or replace package ut_coverage_helper authid definer is
   );
 
   type t_tmp_table_objects_crsr is ref cursor return t_tmp_table_object;
-
-  function  is_develop_mode return boolean;
-
-  procedure coverage_start(a_run_comment varchar2);
-
-  /*
-  * Start coverage in develop mode, where all internal calls to utPLSQL itself are also included
-  */
-  procedure coverage_start_develop;
-
-  procedure coverage_stop;
-
-  procedure coverage_stop_develop;
-
-  procedure coverage_pause;
-
-  procedure coverage_resume;
-
-  function get_raw_coverage_data(a_object_owner varchar2, a_object_name varchar2) return t_unit_line_calls;
-
-  /***
-  * Allows overwriting of private global variable g_coverage_id
-  * Used internally, only for unit testing of the framework only
-  */
-  procedure mock_coverage_id(a_coverage_id integer);
 
   procedure insert_into_tmp_table(a_data t_coverage_sources_tmp_rows);
 

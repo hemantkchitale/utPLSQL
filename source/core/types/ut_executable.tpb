@@ -1,7 +1,7 @@
 create or replace type body ut_executable is
   /*
   utPLSQL - Version 3
-  Copyright 2016 - 2017 utPLSQL Project
+  Copyright 2016 - 2019 utPLSQL Project
 
   Licensed under the Apache License, Version 2.0 (the "License"):
   you may not use this file except in compliance with the License.
@@ -17,98 +17,105 @@ create or replace type body ut_executable is
   */
 
   constructor function ut_executable(
-    self in out nocopy ut_executable, a_context ut_suite_item,
-    a_procedure_name varchar2, a_associated_event_name varchar2
+    self in out nocopy ut_executable, a_owner varchar2, a_package varchar2,
+    a_procedure_name varchar2, a_executable_type varchar2
   ) return self as result is
   begin
-    self.associated_event_name := a_associated_event_name;
-    self.owner_name := a_context.object_owner;
-    self.object_name := a_context.object_name;
+    self.self_type := $$plsql_unit;
+    self.executable_type := a_executable_type;
+    self.owner_name := a_owner;
+    self.object_name := a_package;
     self.procedure_name := a_procedure_name;
     return;
   end;
 
-  member function is_defined return boolean is
+  member function form_name(a_skip_current_user_schema boolean := false) return varchar2 is
+    l_owner_name varchar2(250) := owner_name;
   begin
-    return self.procedure_name is not null and self.object_name is not null;
-  end;
-
-  member function is_valid(self in out nocopy ut_executable) return boolean is
-    l_result boolean := false;
-    l_message_part varchar2(4000) := 'Call params for ' || self.associated_event_name || ' are not valid: ';
-  begin
-
-    if self.object_name is null then
-      self.error_stack := l_message_part || 'package is not defined';
-    elsif not ut_metadata.package_valid(self.owner_name, self.object_name) then
-      self.error_stack := l_message_part || 'package does not exist or is invalid: ' ||upper(self.owner_name||'.'||self.object_name);
-    elsif self.procedure_name is null then
-      self.error_stack := l_message_part || 'procedure is not defined';
-    elsif not ut_metadata.procedure_exists(self.owner_name, self.object_name, self.procedure_name) then
-      self.error_stack := l_message_part || 'package missing procedure  '
-                          || upper(self.owner_name || '.' || self.object_name || '.' ||self.procedure_name);
-    else
-      l_result := true;
+    if a_skip_current_user_schema and sys_context('userenv', 'current_schema') = owner_name then
+      l_owner_name := null;
     end if;
-
-    return l_result;
-  end is_valid;
-
-  member function form_name return varchar2 is
-  begin
-    return ut_metadata.form_name(owner_name, object_name, procedure_name);
+    return ut_metadata.form_name(l_owner_name, object_name, procedure_name);
   end;
 
-  member procedure do_execute(self in out nocopy ut_executable, a_item in out nocopy ut_suite_item, a_listener in out nocopy ut_event_listener_base) is
+  member procedure do_execute(self in out nocopy ut_executable, a_item in out nocopy ut_suite_item) is
     l_completed_without_errors  boolean;
   begin
-    l_completed_without_errors := self.do_execute(a_item, a_listener);
+    l_completed_without_errors := self.do_execute(a_item);
   end do_execute;
 
-	member function do_execute(self in out nocopy ut_executable, a_item in out nocopy ut_suite_item, a_listener in out nocopy ut_event_listener_base) return boolean is
+	member function do_execute(self in out nocopy ut_executable, a_item in out nocopy ut_suite_item) return boolean is
     l_statement                varchar2(4000);
     l_status                   number;
     l_cursor_number            number;
     l_completed_without_errors boolean := true;
+    l_failed_with_invalid_pck  boolean := true;
     l_start_transaction_id     varchar2(250);
     l_end_transaction_id     varchar2(250);
-    
+
+    function is_defined return boolean is
+      l_result boolean := false;
+      l_message_part varchar2(4000) := 'Call params for ' || self.executable_type || ' are not valid: ';
+    begin
+
+      if self.object_name is null then
+        self.error_stack := l_message_part || 'package is not defined';
+      elsif self.procedure_name is null then
+        self.error_stack := l_message_part || 'procedure is not defined';
+      else
+        l_result := true;
+      end if;
+
+      return l_result;
+    end is_defined;
+
+    function is_invalid return boolean is
+      l_result boolean := true;
+      l_message_part varchar2(4000) := 'Call params for ' || self.executable_type || ' are not valid: ';
+    begin
+
+      if not ut_metadata.package_valid(self.owner_name, self.object_name) then
+        self.error_stack := l_message_part || 'package '||upper(self.owner_name||'.'||self.object_name)||' does not exist or is invalid.';
+      elsif not ut_metadata.procedure_exists(self.owner_name, self.object_name, self.procedure_name) then
+        self.error_stack := l_message_part || 'procedure '||upper(self.owner_name || '.' || self.object_name || '.' ||self.procedure_name)||' does not exist.';
+      else
+        l_result := false;
+      end if;
+
+      return l_result;
+    end is_invalid;
+
     procedure save_dbms_output is
       l_status number;
       l_line varchar2(32767);
     begin
-      dbms_lob.createtemporary(self.serveroutput, true, dur => dbms_lob.session);
 
-      loop
-        dbms_output.get_line(line => l_line, status => l_status);
-        exit when l_status = 1;
-
+      dbms_output.get_line(line => l_line, status => l_status);
+      if l_status != 1 then
+        dbms_lob.createtemporary(self.serveroutput, true, dur => dbms_lob.session);
+      end if;
+      while l_status != 1 loop
         if l_line is not null then
-          ut_utils.append_to_clob(self.serveroutput, l_line);
+          ut_utils.append_to_clob(self.serveroutput, l_line||chr(10));
         end if;
-
-        dbms_lob.writeappend(self.serveroutput,1,chr(10));
+        dbms_output.get_line(line => l_line, status => l_status);
       end loop;
     end save_dbms_output;
   begin
-    if self.is_defined() then
-      l_start_transaction_id := dbms_transaction.local_transaction_id(true);
+    l_start_transaction_id := dbms_transaction.local_transaction_id(true);
 
-      -- report to application_info
-      ut_utils.set_client_info(self.procedure_name);
+    --listener - before call to executable
+    ut_event_manager.trigger_event('before_'||self.executable_type, self);
 
-      --listener - before call to executable
-      a_listener.fire_before_event(self.associated_event_name, a_item);
-
-      ut_metadata.do_resolve(a_owner => self.owner_name, a_object => self.object_name, a_procedure_name => self.procedure_name);
-
+    l_completed_without_errors := is_defined();
+    if l_completed_without_errors then
       l_statement :=
       'declare' || chr(10) ||
       '  l_error_stack varchar2(32767);' || chr(10) ||
       '  l_error_backtrace varchar2(32767);' || chr(10) ||
       'begin' || chr(10) ||
       '  begin' || chr(10) ||
-      '    ' || ut_metadata.form_name(self.owner_name, self.object_name, self.procedure_name) || ';' || chr(10) ||
+      '    ' || self.form_name( a_skip_current_user_schema => true ) || ';' || chr(10) ||
       '  exception' || chr(10) ||
       '    when others then ' || chr(10) ||
       '      l_error_stack := dbms_utility.format_error_stack;' || chr(10) ||
@@ -122,32 +129,50 @@ create or replace type body ut_executable is
       ut_utils.debug_log('ut_executable.do_execute l_statement: ' || l_statement);
 
       l_cursor_number := dbms_sql.open_cursor;
-      dbms_sql.parse(l_cursor_number, statement => l_statement, language_flag => dbms_sql.native);
-      dbms_sql.bind_variable(l_cursor_number, 'a_error_stack', to_char(null), 32767);
-      dbms_sql.bind_variable(l_cursor_number, 'a_error_backtrace', to_char(null), 32767);
 
-      l_status := dbms_sql.execute(l_cursor_number);
-      dbms_sql.variable_value(l_cursor_number, 'a_error_stack', self.error_stack);
-      dbms_sql.variable_value(l_cursor_number, 'a_error_backtrace', self.error_backtrace);
-      dbms_sql.close_cursor(l_cursor_number);
-
+      /**
+      * The code will allow to execute once we check if packages are defined
+      * If it fail with 6550 (usually invalid package) it will check if because of invalid state or missing
+      * if for any other reason we will propagate it up as we didnt expected.
+      **/
+      begin
+        dbms_sql.parse(l_cursor_number, statement => l_statement, language_flag => dbms_sql.native);
+        dbms_sql.bind_variable(l_cursor_number, 'a_error_stack', to_char(null), 32767);
+        dbms_sql.bind_variable(l_cursor_number, 'a_error_backtrace', to_char(null), 32767);
+        l_status := dbms_sql.execute(l_cursor_number);
+        dbms_sql.variable_value(l_cursor_number, 'a_error_stack', self.error_stack);
+        dbms_sql.variable_value(l_cursor_number, 'a_error_backtrace', self.error_backtrace);
+        dbms_sql.close_cursor(l_cursor_number);
+      exception 
+        when ut_utils.ex_invalid_package then
+          l_failed_with_invalid_pck := is_invalid();
+          dbms_sql.close_cursor(l_cursor_number);
+          if not l_failed_with_invalid_pck then 
+            raise;
+          end if;
+        when others then
+         dbms_sql.close_cursor(l_cursor_number);
+         raise;
+      end;
+      
       save_dbms_output;
 
       l_completed_without_errors := (self.error_stack||self.error_backtrace) is null;
       if self.error_stack like '%ORA-04068%' or self.error_stack like '%ORA-04061%' then
         ut_expectation_processor.set_invalidation_exception();
       end if;
-      --listener - after call to executable
-      a_listener.fire_after_event(self.associated_event_name, a_item);
+    end if;
 
-      l_end_transaction_id := dbms_transaction.local_transaction_id();
-      if l_start_transaction_id != l_end_transaction_id or l_end_transaction_id is null then
-        a_item.add_transaction_invalidator(self.form_name());
-      end if;
-      ut_utils.set_client_info(null);
+    --listener - after call to executable
+    ut_event_manager.trigger_event('after_'||self.executable_type, self);
+
+    l_end_transaction_id := dbms_transaction.local_transaction_id();
+    if l_start_transaction_id != l_end_transaction_id or l_end_transaction_id is null then
+      a_item.add_transaction_invalidator(self.form_name());
     end if;
 
     return l_completed_without_errors;
+    
   end do_execute;
 
   member function get_error_stack_trace return varchar2 is

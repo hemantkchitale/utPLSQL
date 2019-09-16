@@ -1,7 +1,7 @@
 create or replace package ut_annotation_manager authid current_user as
   /*
   utPLSQL - Version 3
-  Copyright 2016 - 2017 utPLSQL Project
+  Copyright 2016 - 2019 utPLSQL Project
 
   Licensed under the Apache License, Version 2.0 (the "License"):
   you may not use this file except in compliance with the License.
@@ -27,9 +27,10 @@ create or replace package ut_annotation_manager authid current_user as
    *
    * @param a_object_owner owner of objects to get annotations for
    * @param a_object_type type of objects to get annotations for
+   * @param a_parse_date   date when object was last parsed
    * @return array containing annotated objects along with annotations for each object (nested)
    */
-  function get_annotated_objects(a_object_owner varchar2, a_object_type varchar2) return ut_annotated_objects pipelined;
+  function get_annotated_objects(a_object_owner varchar2, a_object_type varchar2, a_parse_date timestamp := null) return sys_refcursor;
 
   /**
    * Rebuilds annotation cache for a specified schema and object type.
@@ -43,12 +44,18 @@ create or replace package ut_annotation_manager authid current_user as
   procedure rebuild_annotation_cache(a_object_owner varchar2, a_object_type varchar2);
 
   /**
+   * Rebuilds annotation cache for a specified object.
+   */
+  procedure trigger_obj_annotation_rebuild;
+
+  /**
    * Removes cached information about annotations for objects of specified type and specified owner
    *
    * @param a_object_owner owner of objects to purge annotations for
    * @param a_object_type type of objects to purge annotations for
    */
   procedure purge_cache(a_object_owner varchar2, a_object_type varchar2);
+
 
 end ut_annotation_manager;
 /

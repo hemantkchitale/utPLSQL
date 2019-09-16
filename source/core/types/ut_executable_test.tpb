@@ -1,28 +1,46 @@
 create or replace type body ut_executable_test as
+  /*
+  utPLSQL - Version 3
+  Copyright 2016 - 2019 utPLSQL Project
+
+  Licensed under the Apache License, Version 2.0 (the "License"):
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  */
+
   constructor function ut_executable_test(
-    self in out nocopy ut_executable_test, a_context ut_suite_item,
-    a_procedure_name varchar2, a_associated_event_name varchar2
+    self in out nocopy ut_executable_test, a_owner varchar2, a_package varchar2,
+    a_procedure_name varchar2, a_executable_type varchar2
   ) return self as result is
   begin
-    self.associated_event_name := a_associated_event_name;
-    self.owner_name := a_context.object_owner;
-    self.object_name := a_context.object_name;
+    self.self_type := $$plsql_unit;
+    self.executable_type := a_executable_type;
+    self.owner_name := a_owner;
+    self.object_name := a_package;
     self.procedure_name := a_procedure_name;
     return;
   end;
 
   member procedure do_execute(
-    self in out nocopy ut_executable_test, a_item in out nocopy ut_suite_item, 
-    a_listener in out nocopy ut_event_listener_base, a_expected_error_codes in ut_integer_list
+    self in out nocopy ut_executable_test, a_item in out nocopy ut_suite_item,
+    a_expected_error_codes in ut_integer_list
   ) is
     l_completed_without_errors  boolean;
   begin
-    l_completed_without_errors := self.do_execute(a_item, a_listener, a_expected_error_codes);
+    l_completed_without_errors := self.do_execute(a_item, a_expected_error_codes);
   end do_execute;
 
   member function do_execute(
-    self in out nocopy ut_executable_test, a_item in out nocopy ut_suite_item, 
-    a_listener in out nocopy ut_event_listener_base, a_expected_error_codes in ut_integer_list
+    self in out nocopy ut_executable_test, a_item in out nocopy ut_suite_item,
+    a_expected_error_codes in ut_integer_list
   ) return boolean is
     l_expected_except_message  varchar2(4000);
 
@@ -53,14 +71,14 @@ create or replace type body ut_executable_test as
     end;
   begin
     --Create a ut_executable object and call do_execute after that get the data to know the test's execution result
-    self.do_execute(a_item, a_listener);
+    self.do_execute(a_item);
 
     if a_expected_error_codes is not null and a_expected_error_codes is not empty then
       l_expected_except_message := failed_expec_errnum_message(a_expected_error_codes);
 
       if l_expected_except_message is not null then
         ut_expectation_processor.add_expectation_result(
-          ut_expectation_result(ut_utils.tr_failure, null, l_expected_except_message, false)
+          ut_expectation_result(ut_utils.gc_failure, null, l_expected_except_message, false)
         );
       end if;
       self.error_stack := null;
